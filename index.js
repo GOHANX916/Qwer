@@ -1,122 +1,73 @@
 import express from "express";
-import { createServer } from "http";
+import http from "http";
 import { Server } from "socket.io";
+import cors from "cors";
+import bcrypt from "bcryptjs";
 import { createClient } from "@supabase/supabase-js";
-import bcrypt from "bcrypt";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
-const server = createServer(app);
+const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*", // Allow all origins
+    origin: "*",
+    methods: ["GET", "POST"],
   },
 });
 
-// Supabase Connection
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+app.use(cors());
 app.use(express.json());
 
-// Function to Create Tables If They Don't Exist
-async function createTables() {
-  await supabase.rpc("create_users_table");
-  await supabase.rpc("create_messages_table");
-}
-
-// Create Users Table
-async function createUsersTable() {
-  const { error } = await supabase.rpc("create_users_table", {});
-  if (error) console.error("Error creating users table:", error);
-}
-
-// Create Messages Table
-async function createMessagesTable() {
-  const { error } = await supabase.rpc("create_messages_table", {});
-  if (error) console.error("Error creating messages table:", error);
-}
-
-// Sign Up
+// User Sign-Up
 app.post("/signup", async (req, res) => {
   const { username, email, password } = req.body;
-
-  // Check if the user already exists
-  const { data: existingUser } = await supabase
-    .from("users")
-    .select("*")
-    .or(`username.eq.${username},email.eq.${email}`);
-
-  if (existingUser.length > 0) {
-    return res.status(400).json({ error: "Username or email already exists" });
-  }
-
-  // Hash password
   const hashedPassword = await bcrypt.hash(password, 10);
+  
+  const { data, error } = await supabase.from("users").insert([
+    { username, email, password: hashedPassword }
+  ]);
 
-  // Insert new user
-  const { data, error } = await supabase
-    .from("users")
-    .insert([{ username, email, password: hashedPassword }]);
-
-  if (error) return res.status(500).json({ error: error.message });
-
-  res.status(201).json({ message: "User created successfully" });
+  if (error) return res.status(400).json({ error: error.message });
+  res.status(201).json({ message: "User registered successfully!", data });
 });
 
-// Log In
+// User Login
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
+  
+  const { data, error } = await supabase.from("users").select("*").eq("username", username).single();
+  if (error || !data) return res.status(400).json({ error: "Invalid username or password" });
 
-  // Find user
-  const { data: user, error } = await supabase
-    .from("users")
-    .select("*")
-    .eq("username", username)
-    .single();
+  const isMatch = await bcrypt.compare(password, data.password);
+  if (!isMatch) return res.status(400).json({ error: "Invalid username or password" });
 
-  if (error || !user) return res.status(400).json({ error: "Invalid credentials" });
-
-  // Compare password
-  const validPassword = await bcrypt.compare(password, user.password);
-  if (!validPassword) return res.status(400).json({ error: "Invalid credentials" });
-
-  res.json({ message: "Login successful", username: user.username });
+  res.json({ message: "Login successful", user: data });
 });
 
-// WebSocket Connection
+// WebSocket for Real-Time Chat
 io.on("connection", (socket) => {
-  console.log("A user connected:", socket.id);
+  console.log("A user connected");
 
-  // Handle incoming messages
-  socket.on("sendMessage", async (data) => {
-    const { sender, message } = data;
-
-    // Store message in Supabase
-    const { error } = await supabase.from("messages").insert([{ sender, message }]);
-
-    if (error) {
-      console.error("Error saving message:", error);
-      return;
-    }
-
-    // Send message to all connected clients
+  socket.on("sendMessage", async ({ sender, message }) => {
+    const { data, error } = await supabase.from("messages").insert([
+      { sender, message }
+    ]);
+    if (error) return;
     io.emit("receiveMessage", { sender, message });
   });
 
-  // Handle disconnect
   socket.on("disconnect", () => {
-    console.log("A user disconnected:", socket.id);
+    console.log("User disconnected");
   });
 });
 
-// Start server
-const port = process.env.PORT || 3000;
-server.listen(port, async () => {
-  console.log(`Server running on port ${port}`);
-  await createUsersTable();
-  await createMessagesTable();
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
